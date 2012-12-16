@@ -14,9 +14,77 @@ module_param( debug, int, S_IRUGO );
 
 #define LOG(...) if( debug !=0 ) printk( KERN_INFO __VA_ARGS__ )
 
+static ktime_t tout;
+static struct kt_data {
+struct hrtimer timer;
+ktime_t        period;
+int            numb;
+} *data;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
+static int ktfun( struct hrtimer *var ) {
+#else
+static enum hrtimer_restart ktfun( struct hrtimer *var ) {
+#endif
+    ktime_t now = var->base->get_time();      // текущее время в типе ktime_t
+    hrtimer_forward( var, now, tout );
+    if (zzz) {
+        sleepy++; hungry++; data->numb++; zzz--;
+        strcpy(buf_msg, "I'm sleeping! Z-Z-Z...");  
+    } else if (sleepy < 5 && hungry < 4) {
+        strcpy(buf_msg, "I WANT TO SLEEP AND EAT!");  
+    } else if (sleepy < 5) {
+        strcpy(buf_msg, "I WANT TO SLEEP!");  
+    } else if (hungry < 4) {
+        strcpy(buf_msg, "I WANT TO EAT!");  
+    } else {
+        strcpy(buf_msg, "MIAU! MIAU!");  
+    }
+    
+    data->numb = hungry + sleepy - 2; 
+    if (sleepy <= 0) {
+        data->numb = 0;
+        printk( KERN_ERR "KITTEN DEAD!");
+        //panic("MIAAAAAAAAAAAAAAAAAAU!");
+    } else sleepy--;
+
+    if (hungry <= 0) {
+        data->numb = 0;
+        printk( KERN_ERR "KITTEN DEAD!");
+        //panic("MIAAAAAAAAAAAAAAAAAAU!");
+    } else hungry--;
+    printk(KERN_INFO "total %d: hungry %d - sleepy %d", data->numb, hungry, sleepy);
+
+    return data->numb-- > 0 ? HRTIMER_RESTART : HRTIMER_NORESTART;
+}
+
+int timer_init(int ticks) {
+    enum hrtimer_mode mode;
+    #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
+    mode = HRTIMER_REL;
+    #else
+    mode = HRTIMER_MODE_REL;
+    #endif
+    tout = ktime_set(10, 0 );      /* 1 sec. + 0 nsec. */
+    data = kmalloc( sizeof(*data), GFP_KERNEL );
+    data->period = tout;
+    hrtimer_init( &data->timer, CLOCK_REALTIME, mode );
+    data->timer.function = ktfun;
+    data->numb = ticks;
+    hrtimer_start( &data->timer, data->period, mode );
+    return 0;
+}
+
+void timer_stop( void ) {
+    hrtimer_cancel( &data->timer );
+    kfree( data );
+    return;
+}
+
+
 static int dev_open = 0;
 
-static int mopen_open( struct inode *n, struct file *f ) {
+static int kitten_open( struct inode *n, struct file *f ) {
    LOG( "open - node: %p, file: %p, refcount: %d", n, f, module_refcount( THIS_MODULE ) );
    if( dev_open ) return -EBUSY;
    if( 1 == mode ) dev_open++;
@@ -28,7 +96,7 @@ static int mopen_open( struct inode *n, struct file *f ) {
    return 0;
 }
       
-static int mopen_release( struct inode *n, struct file *f ) {
+static int kitten_release( struct inode *n, struct file *f ) {
    LOG( "close - node: %p, file: %p, refcount: %d", n, f, module_refcount( THIS_MODULE ) );
    if( 1 == mode ) dev_open--;
    if( 2 == mode ) kfree( f->private_data );
@@ -36,7 +104,7 @@ static int mopen_release( struct inode *n, struct file *f ) {
 }
 
 static char* get_buffer( struct file *f ) {
-   static char static_buf[ LEN_MSG + 1 ] = "static: not initialized!"; // статический буфер :
+   static char static_buf[ LEN_MSG + 1 ] = "MIAU!"; // статический буфер :
    switch( mode ) {
       case 0:
       case 1:
@@ -47,58 +115,58 @@ static char* get_buffer( struct file *f ) {
    }
 }
 
-// чтение из /dev/mopen :
-static ssize_t mopen_read( struct file *f, char *buf, size_t count, loff_t *pos ) {
+// чтение из /dev/kitten :
+static ssize_t kitten_read( struct file *f, char *buf, size_t count, loff_t *pos ) {
    static int odd = 0;
    char *buf_msg = get_buffer( f );
-   LOG( "read - file: %p, read from %p bytes %d; refcount: %d",
-        f, buf_msg, count, module_refcount( THIS_MODULE ) );
    if( 0 == odd ) {
       int res = copy_to_user( (void*)buf, buf_msg, strlen( buf_msg ) );
       odd = 1;
       put_user( '\n', buf + strlen( buf_msg ) );
       res = strlen( buf_msg ) + 1;
-      LOG( "return bytes :  %d", res );
       return res;
    }
    odd = 0;
-   LOG( "return : EOF" );
    return 0;
 }
 
-// запись в /dev/mopen :
-static ssize_t mopen_write( struct file *f, const char *buf, size_t count, loff_t *pos ) {
+// запись в /dev/kitten :
+static ssize_t kitten_write( struct file *f, const char *buf, size_t count, loff_t *pos ) {
+   if (zzz) return 0;
    int res, len = count < LEN_MSG ? count : LEN_MSG;
    char *buf_msg = get_buffer( f );
-   LOG( "write - file: %p, write to %p bytes %d; refcount: %d",
-        f, buf_msg, count, module_refcount( THIS_MODULE ) );
    res = copy_from_user( buf_msg, (void*)buf, len );
    if( '\n' == buf_msg[ len -1 ] ) buf_msg[ len -1 ] = '\0';
    else buf_msg[ len ] = '\0';
-   LOG( "put bytes : %d", len );
+   if (!strcmp(buf_msg, "sleep")) {
+        printk(KERN_INFO "Z-Z-Z");
+        zzz = 5;
+        sleepy += 5;
+   } else {
+        hungry += 4;
+   }
    return len;
 }
 
-static const struct file_operations mopen_fops = {
+static const struct file_operations kitten_fops = {
    .owner  = THIS_MODULE,
-   .open =    mopen_open,
-   .release = mopen_release,
-   .read   =  mopen_read,
-   .write  =  mopen_write,
+   .open =    kitten_open,
+   .release = kitten_release,
+   .read   =  kitten_read,
+   .write  =  kitten_write,
 };
 
-static struct miscdevice mopen_dev = {
-   MISC_DYNAMIC_MINOR, DEVNAM, &mopen_fops
+static struct miscdevice kitten_dev = {
+   MISC_DYNAMIC_MINOR, DEVNAM, &kitten_fops
 };
 
 ssize_t proc_node_read( char *buffer, char **start, off_t off,
 	                        int count, int *eof, void *data ) {
-	// ... в точности то, что и в предыдущем случае ...
     static int offset = 0, i;
 	printk( KERN_INFO "read: %d\n", count );
 	for( i = 0; offset <= LEN_MSG && '\0' != buf_msg[ offset ]; offset++, i++ )
 	   *( buffer + i ) = buf_msg[ offset ];       // buffer не в пространстве пользователя!
-	*( buffer + i ) = '\n';                       // дополним переводом строки
+	*( buffer + i ) = '\n';                       
 	i++;
 	if( offset >= LEN_MSG || '\0' == buf_msg[ offset ] ) {
 	   offset = 0;
@@ -111,8 +179,8 @@ ssize_t proc_node_read( char *buffer, char **start, off_t off,
 };
 
 
-static int __init mopen_init( void ) {
-   int ret = misc_register( &mopen_dev );
+static int __init kitten_init( void ) {
+   int ret = misc_register( &kitten_dev );
    
    struct proc_dir_entry *own_proc_node; 
    own_proc_node = create_proc_entry( NAME_NODE, S_IFREG | S_IRUGO | S_IWUGO, NULL ); 
@@ -126,6 +194,7 @@ static int __init mopen_init( void ) {
 	      own_proc_node->gid = 0;
 	      own_proc_node->read_proc = proc_node_read;
 	      printk( KERN_INFO "module : success!\n");
+          timer_init(10);
    }
    if( ret ) 
       printk( KERN_ERR "unable to register %s misc device", DEVNAM );
@@ -135,16 +204,17 @@ static int __init mopen_init( void ) {
    return ret;
 }
 
-static void __exit mopen_exit( void ) {
+static void __exit kitten_exit( void ) {
+   timer_stop();
    LOG( "released device /dev/%s\n", DEVNAM );
-   misc_deregister( &mopen_dev );
+   misc_deregister( &kitten_dev );
 
    remove_proc_entry( NAME_NODE, NULL );
    printk( KERN_INFO "/proc/%s removed\n", NAME_NODE );
 }
 
-module_init( mopen_init );
-module_exit( mopen_exit );
+module_init( kitten_init );
+module_exit( kitten_exit );
 
 
 
